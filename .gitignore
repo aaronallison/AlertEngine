@@ -1,0 +1,6 @@
+weather_alerts_state.json
+weather_alert_agent.log
+__pycache__/
+*.pyc
+python_libs/
+.claude/
