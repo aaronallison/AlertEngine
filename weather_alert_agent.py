@@ -282,6 +282,30 @@ class WeatherAlertAgent:
             return None
 
     # -------------------------------------------------------------------------
+    # Date formatting helpers
+    # -------------------------------------------------------------------------
+
+    def _days_away(self, date_str):
+        """Return number of days from today to a date string like '2026-02-12'."""
+        target = datetime.strptime(date_str, "%Y-%m-%d").date()
+        today = datetime.now().date()
+        return (target - today).days
+
+    def _day_name(self, date_str):
+        """Return day name like 'Saturday' from a date string."""
+        return datetime.strptime(date_str, "%Y-%m-%d").strftime("%A")
+
+    def _friendly_day_list(self, date_strings):
+        """Turn a list of date strings into 'Saturday, Sunday and Monday'."""
+        names = [self._day_name(d) for d in date_strings]
+        if len(names) == 1:
+            return names[0]
+        elif len(names) == 2:
+            return f"{names[0]} and {names[1]}"
+        else:
+            return ", ".join(names[:-1]) + " and " + names[-1]
+
+    # -------------------------------------------------------------------------
     # Alert checks
     # -------------------------------------------------------------------------
 
@@ -307,10 +331,9 @@ class WeatherAlertAgent:
             first_freeze = freeze_dates_10[0]
             alert_key = f"freeze_10day_{first_freeze[0]}"
             if not self._is_alert_suppressed(alert_key):
-                date_list = ", ".join(f"{d} ({t:.0f}F)" for d, t in freeze_dates_10[:4])
-                if len(freeze_dates_10) > 4:
-                    date_list += "..."
-                msg = f"FREEZE WATCH: Below {threshold:.0f}F on: {date_list}"
+                days_away = self._days_away(first_freeze[0])
+                day_names = self._friendly_day_list([d for d, t in freeze_dates_10[:5]])
+                msg = f"FREEZE WATCH: Below {threshold:.0f}F in {days_away} days - {day_names} coming up"
                 msg = self._truncate_sms(msg)
                 alerts.append((alert_key, msg))
 
@@ -325,8 +348,9 @@ class WeatherAlertAgent:
             first_freeze = freeze_dates_2[0]
             alert_key = f"freeze_urgent_{first_freeze[0]}"
             if not self._is_alert_suppressed(alert_key):
-                date_list = ", ".join(f"{d} ({t:.0f}F)" for d, t in freeze_dates_2)
-                msg = f"URGENT FREEZE: Below {threshold:.0f}F in 48hrs! {date_list}"
+                day_name = self._day_name(first_freeze[0])
+                low_temp = first_freeze[1]
+                msg = f"URGENT FREEZE: {low_temp:.0f}F expected {day_name} night - protect plants!"
                 msg = self._truncate_sms(msg)
                 alerts.append((alert_key, msg))
 
@@ -366,8 +390,9 @@ class WeatherAlertAgent:
         if first_rain_date:
             alert_key = f"rain_change_{first_rain_date}"
             if not self._is_alert_suppressed(alert_key):
-                msg = (f"RAIN INCOMING: Clear now, rain by "
-                       f"{first_rain_date} ({first_rain_precip:.2f} in)")
+                days_away = self._days_away(first_rain_date)
+                day_name = self._day_name(first_rain_date)
+                msg = f"RAIN INCOMING: Clear now, rain starting {day_name} ({days_away} days out)"
                 msg = self._truncate_sms(msg)
                 alerts.append((alert_key, msg))
 
@@ -398,8 +423,8 @@ class WeatherAlertAgent:
                 day_pairs.sort(key=lambda x: x[1], reverse=True)
                 heaviest = day_pairs[0] if day_pairs else (dates[0], 0)
 
-                msg = (f"HEAVY RAIN: {total_rain:.1f} in over {check_days} days "
-                       f"(worst: {heaviest[0]} {heaviest[1]:.1f} in)")
+                heaviest_day = self._day_name(heaviest[0])
+                msg = f"HEAVY RAIN: {total_rain:.1f} in expected over next {check_days} days - heaviest on {heaviest_day}"
                 msg = self._truncate_sms(msg)
                 alerts.append((alert_key, msg))
 
