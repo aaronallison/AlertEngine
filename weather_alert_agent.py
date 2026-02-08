@@ -9,6 +9,7 @@ Alert Conditions:
   2. Urgent Freeze: Temp <= 28°F within next 10 days
   3. Rain Incoming:  Currently clear, rain >= 0.25in expected within 7 days
   4. Heavy Rain:     2+ inches cumulative rain in next 10 days
+  5. High Winds:    Wind >= 30 mph within next 10 days
 
 Usage:
   python weather_alert_agent.py            # Continuous loop (every 6 hours)
@@ -67,6 +68,8 @@ ALERT_THRESHOLDS = {
     "heavy_rain_days": 10,               # Heavy Rain look-ahead window
     "rain_change_days": 7,               # Rain Incoming look-ahead window
     "rain_change_min_inches": 0.25,      # Rain Incoming: >= 0.25 inches per day
+    "high_wind_mph": 30.0,               # High Winds: >= 30 mph
+    "high_wind_days": 10,                # High Winds look-ahead window
 }
 
 # --- Operational ---
@@ -247,9 +250,10 @@ class WeatherAlertAgent:
         params = {
             "latitude": LOCATION["latitude"],
             "longitude": LOCATION["longitude"],
-            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode,windspeed_10m_max",
             "temperature_unit": "fahrenheit",
             "precipitation_unit": "inch",
+            "windspeed_unit": "mph",
             "timezone": LOCATION["timezone"],
             "forecast_days": OPERATIONAL["forecast_days"],
         }
@@ -265,7 +269,7 @@ class WeatherAlertAgent:
             daily = data.get("daily", {})
             required_keys = [
                 "time", "temperature_2m_max", "temperature_2m_min",
-                "precipitation_sum", "weathercode"
+                "precipitation_sum", "weathercode", "windspeed_10m_max"
             ]
             for key in required_keys:
                 if key not in daily:
@@ -481,6 +485,36 @@ class WeatherAlertAgent:
 
         return alerts
 
+    def check_high_wind_alert(self, forecast):
+        """
+        Check if max wind speed >= 30 mph on any day in next 10 days.
+        Shows each windy day with speed.
+        Returns list of (alert_key, message) tuples.
+        """
+        alerts = []
+        daily = forecast["daily"]
+        dates = daily["time"]
+        wind_speeds = daily["windspeed_10m_max"]
+        threshold = ALERT_THRESHOLDS["high_wind_mph"]
+        check_days = min(ALERT_THRESHOLDS["high_wind_days"], len(dates))
+
+        windy_days = []
+        for i in range(check_days):
+            if wind_speeds[i] is not None and wind_speeds[i] >= threshold:
+                windy_days.append((dates[i], wind_speeds[i]))
+
+        if windy_days:
+            first_windy = windy_days[0]
+            alert_key = f"high_wind_{first_windy[0]}"
+            if not self._is_alert_suppressed(alert_key):
+                day_list = "\n".join(
+                    f"{self._day_name(d)} {w:.0f} mph" for d, w in windy_days
+                )
+                msg = f"HIGH WINDS ALERT\n\n{day_list}"
+                alerts.append((alert_key, msg))
+
+        return alerts
+
     # -------------------------------------------------------------------------
     # SMS sending
     # -------------------------------------------------------------------------
@@ -530,6 +564,7 @@ class WeatherAlertAgent:
         all_alerts.extend(self.check_freeze_alerts(forecast))
         all_alerts.extend(self.check_rain_change_alert(forecast))
         all_alerts.extend(self.check_heavy_rain_alert(forecast))
+        all_alerts.extend(self.check_high_wind_alert(forecast))
 
         if not all_alerts:
             self.logger.info("No alert conditions detected.")
@@ -636,6 +671,7 @@ class WeatherAlertAgent:
         alerts.extend(self.check_freeze_alerts(forecast))
         alerts.extend(self.check_rain_change_alert(forecast))
         alerts.extend(self.check_heavy_rain_alert(forecast))
+        alerts.extend(self.check_high_wind_alert(forecast))
 
         if alerts:
             for key, msg in alerts:
