@@ -5,9 +5,9 @@ Monitors weather forecasts for Portland, OR (97231) and sends SMS text alerts
 via Zapier webhook when specific conditions are detected.
 
 Alert Conditions:
-  1. Freeze Watch:  Temp below 32°F within next 10 days
-  2. Urgent Freeze: Temp below 32°F within next 2 days
-  3. Rain Incoming:  Currently sunny, rain expected within 7 days
+  1. Freeze Watch:  Temp <= 31°F within next 10 days
+  2. Urgent Freeze: Temp <= 28°F within next 10 days
+  3. Rain Incoming:  Currently clear, rain >= 0.25in expected within 7 days
   4. Heavy Rain:     2+ inches cumulative rain in next 10 days
 
 Usage:
@@ -60,12 +60,13 @@ ZAPIER_CONFIG = {
 
 # --- Alert Thresholds ---
 ALERT_THRESHOLDS = {
-    "freeze_temp_f": 32.0,
-    "freeze_warning_days": 10,
-    "freeze_urgent_days": 2,
-    "heavy_rain_inches": 2.0,
-    "heavy_rain_days": 10,
-    "rain_change_days": 7,
+    "freeze_watch_temp_f": 31.0,         # Freeze Watch: <= 31F
+    "freeze_urgent_temp_f": 28.0,        # Urgent Freeze: <= 28F
+    "freeze_warning_days": 10,           # Both freeze alerts look 10 days out
+    "heavy_rain_inches": 2.0,            # Heavy Rain: >= 2.0 inches cumulative
+    "heavy_rain_days": 10,               # Heavy Rain look-ahead window
+    "rain_change_days": 7,               # Rain Incoming look-ahead window
+    "rain_change_min_inches": 0.25,      # Rain Incoming: >= 0.25 inches per day
 }
 
 # --- Operational ---
@@ -295,6 +296,10 @@ class WeatherAlertAgent:
         """Return day name like 'Saturday' from a date string."""
         return datetime.strptime(date_str, "%Y-%m-%d").strftime("%A")
 
+    def _short_day_name(self, date_str):
+        """Return short day name like 'Mon' from a date string."""
+        return datetime.strptime(date_str, "%Y-%m-%d").strftime("%A")[:3]
+
     def _friendly_day_list(self, date_strings):
         """Turn a list of date strings into 'Saturday, Sunday and Monday'."""
         names = [self._day_name(d) for d in date_strings]
@@ -312,53 +317,58 @@ class WeatherAlertAgent:
     def check_freeze_alerts(self, forecast):
         """
         Check for freezing temperatures.
+        - Freeze Watch: <= 31F within 10 days
+        - Urgent Freeze: <= 28F within 10 days
         Returns list of (alert_key, message) tuples.
         """
         alerts = []
         daily = forecast["daily"]
         dates = daily["time"]
         min_temps = daily["temperature_2m_min"]
-        threshold = ALERT_THRESHOLDS["freeze_temp_f"]
-
-        # --- 10-day freeze watch ---
         warning_days = min(ALERT_THRESHOLDS["freeze_warning_days"], len(dates))
-        freeze_dates_10 = []
-        for i in range(warning_days):
-            if min_temps[i] is not None and min_temps[i] < threshold:
-                freeze_dates_10.append((dates[i], min_temps[i]))
 
-        if freeze_dates_10:
-            first_freeze = freeze_dates_10[0]
-            alert_key = f"freeze_10day_{first_freeze[0]}"
+        # --- Freeze Watch: <= 31F in next 10 days ---
+        watch_threshold = ALERT_THRESHOLDS["freeze_watch_temp_f"]
+        freeze_watch_days = []
+        for i in range(warning_days):
+            if min_temps[i] is not None and min_temps[i] <= watch_threshold:
+                freeze_watch_days.append((dates[i], min_temps[i]))
+
+        if freeze_watch_days:
+            first_freeze = freeze_watch_days[0]
+            alert_key = f"freeze_watch_{first_freeze[0]}"
             if not self._is_alert_suppressed(alert_key):
                 days_away = self._days_away(first_freeze[0])
-                day_names = self._friendly_day_list([d for d, t in freeze_dates_10[:5]])
-                msg = f"FREEZE WATCH: Below {threshold:.0f}F in {days_away} days - {day_names} coming up"
-                msg = self._truncate_sms(msg)
+                day_list = " / ".join(
+                    f"{self._day_name(d)} {t:.0f}F" for d, t in freeze_watch_days
+                )
+                msg = f"FREEZE WATCH: {watch_threshold:.0f}F or below in {days_away} days\n{day_list}"
                 alerts.append((alert_key, msg))
 
-        # --- 2-day urgent freeze ---
-        urgent_days = min(ALERT_THRESHOLDS["freeze_urgent_days"], len(dates))
-        freeze_dates_2 = []
-        for i in range(urgent_days):
-            if min_temps[i] is not None and min_temps[i] < threshold:
-                freeze_dates_2.append((dates[i], min_temps[i]))
+        # --- Urgent Freeze: <= 28F in next 10 days ---
+        urgent_threshold = ALERT_THRESHOLDS["freeze_urgent_temp_f"]
+        freeze_urgent_days = []
+        for i in range(warning_days):
+            if min_temps[i] is not None and min_temps[i] <= urgent_threshold:
+                freeze_urgent_days.append((dates[i], min_temps[i]))
 
-        if freeze_dates_2:
-            first_freeze = freeze_dates_2[0]
+        if freeze_urgent_days:
+            first_freeze = freeze_urgent_days[0]
             alert_key = f"freeze_urgent_{first_freeze[0]}"
             if not self._is_alert_suppressed(alert_key):
-                day_name = self._day_name(first_freeze[0])
-                low_temp = first_freeze[1]
-                msg = f"URGENT FREEZE: {low_temp:.0f}F expected {day_name} night - protect plants!"
-                msg = self._truncate_sms(msg)
+                days_away = self._days_away(first_freeze[0])
+                day_list = " / ".join(
+                    f"{self._day_name(d)} {t:.0f}F" for d, t in freeze_urgent_days
+                )
+                msg = f"URGENT FREEZE: {urgent_threshold:.0f}F or below in {days_away} days - protect plants!\n{day_list}"
                 alerts.append((alert_key, msg))
 
         return alerts
 
     def check_rain_change_alert(self, forecast):
         """
-        Check if today is sunny/clear and rain is expected within 7 days.
+        Check if today is clear and significant rain (>= 0.25in) is coming within 7 days.
+        Shows each rainy day with amounts.
         Returns list of (alert_key, message) tuples.
         """
         alerts = []
@@ -373,40 +383,43 @@ class WeatherAlertAgent:
         # Is today clear?
         today_code = weather_codes[0]
         if today_code not in CLEAR_CODES:
-            return alerts  # Not sunny today — no alert
+            return alerts  # Not clear today — no alert
 
-        # Look for rain in the next 7 days
+        # Find all rainy days >= 0.25 inches in next 7 days
         check_days = min(ALERT_THRESHOLDS["rain_change_days"], len(dates))
-        first_rain_date = None
-        first_rain_precip = None
+        min_rain = ALERT_THRESHOLDS["rain_change_min_inches"]
+        rainy_days = []
+        total_rain = 0.0
 
-        for i in range(1, check_days):  # Skip today (index 0)
+        for i in range(1, check_days):  # Skip today
             if (weather_codes[i] is not None and weather_codes[i] in RAIN_CODES
-                    and precip[i] is not None and precip[i] > 0.0):
-                first_rain_date = dates[i]
-                first_rain_precip = precip[i]
-                break
+                    and precip[i] is not None and precip[i] >= min_rain):
+                rainy_days.append((dates[i], precip[i]))
+                total_rain += precip[i]
 
-        if first_rain_date:
-            alert_key = f"rain_change_{first_rain_date}"
+        if rainy_days:
+            first_rain = rainy_days[0][0]
+            alert_key = f"rain_change_{first_rain}"
             if not self._is_alert_suppressed(alert_key):
-                days_away = self._days_away(first_rain_date)
-                day_name = self._day_name(first_rain_date)
-                msg = f"RAIN INCOMING: Clear now, rain starting {day_name} ({days_away} days out)"
-                msg = self._truncate_sms(msg)
+                day_list = " / ".join(
+                    f"{self._day_name(d)} {p:.1f}" for d, p in rainy_days
+                )
+                msg = f"RAIN INCOMING: Total of {total_rain:.1f} Inches\n{day_list}"
                 alerts.append((alert_key, msg))
 
         return alerts
 
     def check_heavy_rain_alert(self, forecast):
         """
-        Check if cumulative precipitation over next 10 days exceeds threshold.
+        Check if cumulative precipitation over next 10 days exceeds 2.0 inches.
+        Shows daily breakdown and when rain stops / sun returns.
         Returns list of (alert_key, message) tuples.
         """
         alerts = []
         daily = forecast["daily"]
         precip = daily["precipitation_sum"]
         dates = daily["time"]
+        weather_codes = daily["weathercode"]
 
         check_days = min(ALERT_THRESHOLDS["heavy_rain_days"], len(dates))
         total_rain = sum(p for p in precip[:check_days] if p is not None)
@@ -415,17 +428,55 @@ class WeatherAlertAgent:
         if total_rain >= threshold:
             alert_key = f"heavy_rain_{dates[0]}"
             if not self._is_alert_suppressed(alert_key):
-                # Find heaviest day for context
+                # Find heaviest day
                 day_pairs = [
                     (dates[i], precip[i]) for i in range(check_days)
                     if precip[i] is not None and precip[i] > 0
                 ]
                 day_pairs.sort(key=lambda x: x[1], reverse=True)
                 heaviest = day_pairs[0] if day_pairs else (dates[0], 0)
-
                 heaviest_day = self._day_name(heaviest[0])
-                msg = f"HEAVY RAIN: {total_rain:.1f} in expected over next {check_days} days - heaviest on {heaviest_day}"
-                msg = self._truncate_sms(msg)
+
+                # Daily breakdown of rainy days
+                rain_day_list = " / ".join(
+                    f"{self._day_name(d)} {p:.1f}" for d, p in
+                    sorted(day_pairs, key=lambda x: x[0])
+                )
+
+                # Find when rain stops and sun comes out (look up to 16 days)
+                rain_stops_day = None
+                sun_comes_out_day = None
+                all_days = len(dates)
+
+                for i in range(1, all_days):
+                    # Find first day with no rain after a rainy period
+                    if rain_stops_day is None:
+                        if precip[i] is not None and precip[i] == 0:
+                            # Check if previous day had rain
+                            if i > 0 and precip[i-1] is not None and precip[i-1] > 0:
+                                rain_stops_day = dates[i]
+
+                    # Find first clear/sunny day
+                    if sun_comes_out_day is None:
+                        if (weather_codes[i] is not None
+                                and weather_codes[i] in CLEAR_CODES):
+                            sun_comes_out_day = dates[i]
+
+                    if rain_stops_day and sun_comes_out_day:
+                        break
+
+                # Build the sun/rain outlook line
+                if rain_stops_day and sun_comes_out_day:
+                    outlook = f"Rain stops {self._day_name(rain_stops_day)} and Sun comes out {self._day_name(sun_comes_out_day)}"
+                elif rain_stops_day:
+                    outlook = f"Rain stops {self._day_name(rain_stops_day)} - No sun on the horizon"
+                else:
+                    outlook = "No sun on the horizon"
+
+                msg = (f"HEAVY RAIN: {total_rain:.1f} in expected over next {check_days} days"
+                       f" - heaviest on {heaviest_day}\n"
+                       f"{rain_day_list}\n"
+                       f"{outlook}")
                 alerts.append((alert_key, msg))
 
         return alerts
@@ -570,7 +621,7 @@ class WeatherAlertAgent:
 
             # Flag freeze days
             freeze_flag = " ***" if (min_temps[i] is not None
-                                     and min_temps[i] < ALERT_THRESHOLDS["freeze_temp_f"]) else ""
+                                     and min_temps[i] < ALERT_THRESHOLDS["freeze_watch_temp_f"]) else ""
 
             print(f"  {dates[i]:<12} {lo:>5} {hi:>5} {rain:>6}  {cond}{freeze_flag}")
 
