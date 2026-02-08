@@ -251,6 +251,7 @@ class WeatherAlertAgent:
             "latitude": LOCATION["latitude"],
             "longitude": LOCATION["longitude"],
             "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode,windspeed_10m_max",
+            "hourly": "windspeed_10m",
             "temperature_unit": "fahrenheit",
             "precipitation_unit": "inch",
             "windspeed_unit": "mph",
@@ -360,11 +361,12 @@ class WeatherAlertAgent:
             first_freeze = freeze_urgent_days[0]
             alert_key = f"freeze_urgent_{first_freeze[0]}"
             if not self._is_alert_suppressed(alert_key):
-                days_away = self._days_away(first_freeze[0])
-                day_list = " / ".join(
+                # Find the lowest temp across all urgent freeze days
+                lowest_temp = min(t for _, t in freeze_urgent_days)
+                day_list = "\n".join(
                     f"{self._day_name(d)} {t:.0f}F" for d, t in freeze_urgent_days
                 )
-                msg = f"URGENT FREEZE: {urgent_threshold:.0f}F or below in {days_away} days - protect plants!\n{day_list}"
+                msg = f"URGENT FREEZE: Low of {lowest_temp:.0f}F\n\n{day_list}"
                 alerts.append((alert_key, msg))
 
         return alerts
@@ -405,10 +407,10 @@ class WeatherAlertAgent:
             first_rain = rainy_days[0][0]
             alert_key = f"rain_change_{first_rain}"
             if not self._is_alert_suppressed(alert_key):
-                day_list = " / ".join(
+                day_list = "\n".join(
                     f"{self._day_name(d)} {p:.1f}" for d, p in rainy_days
                 )
-                msg = f"RAIN INCOMING: Total of {total_rain:.1f} Inches\n{day_list}"
+                msg = f"RAIN INCOMING: {total_rain:.1f} In\n\n{day_list}"
                 alerts.append((alert_key, msg))
 
         return alerts
@@ -432,63 +434,103 @@ class WeatherAlertAgent:
         if total_rain >= threshold:
             alert_key = f"heavy_rain_{dates[0]}"
             if not self._is_alert_suppressed(alert_key):
-                # Find heaviest day
+                # Get rainy days sorted by date
                 day_pairs = [
                     (dates[i], precip[i]) for i in range(check_days)
                     if precip[i] is not None and precip[i] > 0
                 ]
-                day_pairs.sort(key=lambda x: x[1], reverse=True)
-                heaviest = day_pairs[0] if day_pairs else (dates[0], 0)
-                heaviest_day = self._day_name(heaviest[0])
+                day_pairs.sort(key=lambda x: x[0])
 
-                # Daily breakdown of rainy days
-                rain_day_list = " / ".join(
-                    f"{self._day_name(d)} {p:.1f}" for d, p in
-                    sorted(day_pairs, key=lambda x: x[0])
+                # Daily breakdown with line breaks
+                rain_day_list = "\n".join(
+                    f"{self._day_name(d)} {p:.1f}" for d, p in day_pairs
                 )
 
-                # Find when rain stops and sun comes out (look up to 16 days)
-                rain_stops_day = None
+                # Find first clear/sunny day
                 sun_comes_out_day = None
                 all_days = len(dates)
-
                 for i in range(1, all_days):
-                    # Find first day with no rain after a rainy period
-                    if rain_stops_day is None:
-                        if precip[i] is not None and precip[i] == 0:
-                            # Check if previous day had rain
-                            if i > 0 and precip[i-1] is not None and precip[i-1] > 0:
-                                rain_stops_day = dates[i]
-
-                    # Find first clear/sunny day
-                    if sun_comes_out_day is None:
-                        if (weather_codes[i] is not None
-                                and weather_codes[i] in CLEAR_CODES):
-                            sun_comes_out_day = dates[i]
-
-                    if rain_stops_day and sun_comes_out_day:
+                    if (weather_codes[i] is not None
+                            and weather_codes[i] in CLEAR_CODES):
+                        sun_comes_out_day = dates[i]
                         break
 
-                # Build the sun/rain outlook line
-                if rain_stops_day and sun_comes_out_day:
-                    outlook = f"Rain stops {self._day_name(rain_stops_day)} and Sun comes out {self._day_name(sun_comes_out_day)}"
-                elif rain_stops_day:
-                    outlook = f"Rain stops {self._day_name(rain_stops_day)} - No sun on the horizon"
+                # Short sun outlook line
+                if sun_comes_out_day:
+                    outlook = f"Sun {self._day_name(sun_comes_out_day)}"
                 else:
                     outlook = "No sun on the horizon"
 
-                msg = (f"HEAVY RAIN: {total_rain:.1f} in expected over next {check_days} days"
-                       f" - heaviest on {heaviest_day}\n"
+                msg = (f"HEAVY RAIN: {total_rain:.1f} in.\n\n"
                        f"{rain_day_list}\n"
                        f"{outlook}")
                 alerts.append((alert_key, msg))
 
         return alerts
 
+    def _format_hour(self, hour):
+        """Format 24h hour as '12 AM', '2 PM', etc."""
+        if hour == 0:
+            return "12 AM"
+        elif hour < 12:
+            return f"{hour} AM"
+        elif hour == 12:
+            return "12 PM"
+        else:
+            return f"{hour - 12} PM"
+
+    def _get_wind_time_ranges(self, forecast, date_str):
+        """
+        Given hourly wind data and a date, find contiguous time ranges
+        where wind >= threshold. Returns list of (start_hour, end_hour, max_speed).
+        """
+        hourly = forecast.get("hourly", {})
+        hourly_times = hourly.get("time", [])
+        hourly_winds = hourly.get("windspeed_10m", [])
+        threshold = ALERT_THRESHOLDS["high_wind_mph"]
+
+        if not hourly_times or not hourly_winds:
+            return []
+
+        # Find all hours for this date that exceed threshold
+        windy_hours = []
+        for i, t in enumerate(hourly_times):
+            if t.startswith(date_str) and i < len(hourly_winds):
+                speed = hourly_winds[i]
+                if speed is not None and speed >= threshold:
+                    hour = int(t[11:13])  # Extract hour from "2026-02-07T14:00"
+                    windy_hours.append((hour, speed))
+
+        if not windy_hours:
+            return []
+
+        # Group into contiguous ranges
+        ranges = []
+        range_start = windy_hours[0][0]
+        range_max = windy_hours[0][1]
+        prev_hour = windy_hours[0][0]
+
+        for hour, speed in windy_hours[1:]:
+            if hour == prev_hour + 1:
+                # Contiguous - extend range
+                range_max = max(range_max, speed)
+                prev_hour = hour
+            else:
+                # Gap - close current range, start new one
+                ranges.append((range_start, prev_hour + 1, range_max))
+                range_start = hour
+                range_max = speed
+                prev_hour = hour
+
+        # Close the last range
+        ranges.append((range_start, prev_hour + 1, range_max))
+
+        return ranges
+
     def check_high_wind_alert(self, forecast):
         """
         Check if max wind speed >= 30 mph on any day in next 10 days.
-        Shows each windy day with speed.
+        Shows each windy day with hourly time ranges and peak speed.
         Returns list of (alert_key, message) tuples.
         """
         alerts = []
@@ -507,10 +549,23 @@ class WeatherAlertAgent:
             first_windy = windy_days[0]
             alert_key = f"high_wind_{first_windy[0]}"
             if not self._is_alert_suppressed(alert_key):
-                day_list = "\n".join(
-                    f"{self._day_name(d)} {w:.0f} mph" for d, w in windy_days
-                )
-                msg = f"HIGH WINDS ALERT\n\n{day_list}"
+                day_lines = []
+                for date_str, max_speed in windy_days:
+                    day_name = self._day_name(date_str)
+                    ranges = self._get_wind_time_ranges(forecast, date_str)
+                    if ranges:
+                        # Show each time range for this day
+                        for start_h, end_h, peak in ranges:
+                            start_str = self._format_hour(start_h)
+                            end_str = self._format_hour(end_h if end_h < 24 else 0)
+                            day_lines.append(
+                                f"{day_name} {start_str} - {end_str} : {peak:.0f} mph"
+                            )
+                    else:
+                        # Fallback if no hourly data available
+                        day_lines.append(f"{day_name} {max_speed:.0f} mph")
+
+                msg = f"HIGH WINDS ALERT\n\n" + "\n".join(day_lines)
                 alerts.append((alert_key, msg))
 
         return alerts
