@@ -33,3 +33,9 @@ jobs:
           ZAPIER_WEBHOOK_URL: ${{ secrets.ZAPIER_WEBHOOK_URL }}
           ALERT_PHONE_NUMBER: ${{ secrets.ALERT_PHONE_NUMBER }}
         run: python seasonal_schedule_alert.py
+
+      - name: Run GDD weed spray alert check
+        env:
+          ZAPIER_WEBHOOK_URL: ${{ secrets.ZAPIER_WEBHOOK_URL }}
+          ALERT_PHONE_NUMBER: ${{ secrets.ALERT_PHONE_NUMBER }}
+        run: python gdd_weed_alert.py

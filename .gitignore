@@ -2,6 +2,8 @@ weather_alerts_state.json
 weather_alert_agent.log
 seasonal_schedule_state.json
 seasonal_schedule_alert.log
+gdd_sis.db
+gdd_weed_alert.log
 __pycache__/
 *.pyc
 python_libs/
