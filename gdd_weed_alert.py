@@ -19,25 +19,18 @@ How GDD is Calculated:
   Cumulative GDD = sum of daily GDD from season start date
 
 Trigger Seasons:
-  FALL (Oct-Dec):
+  FALL (Sep-Oct):
     - Winter annual weeds (chickweed, henbit, mustards, Poa annua)
     - Sprouting trigger: avg daily temp drops below 70F + rain arriving
     - Spray: PRE-emergent within 7-14 days on clean soil
+    - Perennial rosettes forming (dandelion, dock, thistle)
 
-  LATE WINTER (Feb-Mar):
-    - Winter annuals + rosettes actively growing
-    - Sprouting trigger: consecutive warm days > 45F + GDD32 threshold
-    - Spray: POST-emergent 7-21 days later while weeds < 6 inches
-
-  SPRING (Mar-May):
-    - Warm-season annual grasses (crabgrass, foxtail)
-    - Sprouting trigger: GDD50 reaching ~125/150/200
-    - Spray: PRE-emergent before 200 GDD50
-
-  LATE SPRING (May-Jun):
-    - Warm-season broadleaves (lambsquarters, pigweed, ragweed)
-    - Sprouting trigger: GDD50 reaching ~300
-    - Spray: POST-emergent 7-21 days after on small seedlings
+  SPRING (Apr-May):
+    - Winter annuals resuming growth (chickweed, henbit, shepherd purse)
+    - Warm-season annual grasses (crabgrass, foxtail) - GDD50 125/150/200
+    - Warm-season broadleaves (pigweed, ragweed, spurge) - GDD50 300
+    - Perennial rosettes breaking dormancy (dandelion, dock, thistle)
+    - Spray: 7-21 days after sprouting event
 
 Database: SQLite (gdd_sis.db) tracks daily GDD accumulation + spray schedule
 
@@ -77,11 +70,8 @@ LOCATION = {
 }
 
 ZAPIER_CONFIG = {
-    "webhook_url": os.environ.get(
-        "ZAPIER_WEBHOOK_URL",
-        "https://hooks.zapier.com/hooks/catch/23257298/ueog4uk/"
-    ),
-    "phone_number": os.environ.get("ALERT_PHONE_NUMBER", "5034815324"),
+    "webhook_url": os.environ.get("ZAPIER_WEBHOOK_URL", ""),
+    "phone_number": os.environ.get("ALERT_PHONE_NUMBER", ""),
 }
 
 # GDD Base Temperatures
@@ -95,11 +85,11 @@ GDD_BASES = {
 # =============================================================================
 
 TRIGGERS = {
-    # --- FALL PRE-EMERGENT (Oct-Dec) ---
+    # --- FALL PRE-EMERGENT (Sep-Oct) ---
     # Winter annuals germinate when temps cool + first rains arrive
     "fall_pre": {
         "name": "FALL PRE-EMERGENT",
-        "season_months": [9, 10, 11, 12],  # Active Sep-Dec
+        "season_months": [9, 10],  # Active Sep-Oct
         "conditions": {
             "avg_temp_below": 70.0,        # 5-day avg temp drops below 70F
             "rain_2day_min": 0.25,          # At least 0.25 inches rain in 2 days
@@ -110,11 +100,11 @@ TRIGGERS = {
         "spray_window_days": 14,
     },
 
-    # --- LATE WINTER POST-EMERGENT (Feb-Mar) ---
+    # --- LATE WINTER POST-EMERGENT (Apr-May) ---
     # Winter annuals resume growth, rosettes visible
     "late_winter_post": {
         "name": "LATE WINTER SCOUT & SPRAY",
-        "season_months": [2, 3],
+        "season_months": [4, 5],
         "conditions": {
             "consecutive_warm_days": 5,     # 5 consecutive days with avg > 45F
             "warm_day_threshold": 45.0,     # What counts as a "warm" day
@@ -125,11 +115,11 @@ TRIGGERS = {
         "spray_window_days": 21,
     },
 
-    # --- SPRING PRE-EMERGENT (Mar-May) ---
+    # --- SPRING PRE-EMERGENT (Apr-May) ---
     # Warm-season annual grasses about to germinate
     "spring_pre": {
         "name": "SPRING PRE-EMERGENT",
-        "season_months": [3, 4, 5],
+        "season_months": [4, 5],
         "conditions": {
             "gdd50_headsup": 125,           # Heads-up: getting close
             "gdd50_apply_by": 150,          # Apply PRE by this point
@@ -140,11 +130,11 @@ TRIGGERS = {
         "spray_window_days": 14,
     },
 
-    # --- SPRING BROADLEAF FLUSH (Apr-Jun) ---
+    # --- SPRING BROADLEAF FLUSH (Apr-May) ---
     # Warm-season broadleaf annuals emerging
     "spring_broadleaf": {
         "name": "SPRING BROADLEAF FLUSH",
-        "season_months": [4, 5, 6],
+        "season_months": [4, 5],
         "conditions": {
             "gdd50_emergence": 300,         # Broadleaf annuals emerging
             "gdd50_spray_by": 500,          # Spray POST while still small
@@ -157,7 +147,7 @@ TRIGGERS = {
     # --- PERENNIAL ROSETTE WINDOWS (Fall & Spring) ---
     "perennial_fall": {
         "name": "PERENNIAL FALL ROSETTE",
-        "season_months": [9, 10, 11],
+        "season_months": [9, 10],
         "conditions": {
             "avg_temp_below": 65.0,
             "avg_temp_window": 7,
@@ -169,7 +159,7 @@ TRIGGERS = {
 
     "perennial_spring": {
         "name": "PERENNIAL SPRING ROSETTE",
-        "season_months": [3, 4, 5],
+        "season_months": [4, 5],
         "conditions": {
             "consecutive_warm_days": 7,
             "warm_day_threshold": 50.0,
@@ -500,6 +490,11 @@ class GDDWeedAlert:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         return dt.strftime("%A, %b %d").replace(" 0", " ")
 
+    def _short_date(self, date_str):
+        """Format date as 'Feb 23' (compact for SMS)."""
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        return dt.strftime("%b %d").replace(" 0", " ")
+
     def _estimate_spray_date(self, sprouting_date_str, spray_window_days):
         """
         Estimate when to spray based on upcoming temps.
@@ -597,14 +592,13 @@ class GDDWeedAlert:
             else:
                 urgency = "READY"
 
+            # Truncate weeds list for SMS
+            short_weeds = ", ".join(weeds.split(", ")[:4])
             msg = (
-                f"SPRAY WINDOW: {name}\n\n"
-                f"Status: {urgency} - {days_since} days since sprouting\n"
-                f"Spray by: {self._format_date(late)}\n\n"
-                f"Target Weeds:\n"
-                f"{weeds}\n\n"
-                f"Action: {action}\n\n"
-                f"Treat while weeds are small (2-6 leaf, under 6 inches)."
+                f"SPRAY NOW: {name}\n"
+                f"{urgency} {days_since}d since sprout\n"
+                f"Weeds: {short_weeds}\n"
+                f"Spray by: {self._short_date(late)}"
             )
             alerts.append((alert_key, msg))
 
@@ -617,20 +611,19 @@ class GDDWeedAlert:
 
     def check_fall_pre(self):
         """
-        FALL PRE-EMERGENT SPROUTING trigger:
+        FALL PRE-EMERGENT trigger:
         5-day avg temp drops below 70F AND 2-day rain sum >= 0.25 inches.
-        Active Sep-Dec. Sends sprouting alert + schedules spray follow-up.
+        Active Sep-Oct. Sends sprouting + spray-by alerts together.
         """
         current_month = datetime.now().month
         if current_month not in TRIGGERS["fall_pre"]["season_months"]:
-            return None
+            return []
 
         recent = self._get_recent_data(7)
         if len(recent) < 5:
-            return None
+            return []
 
         latest = recent[-1]
-        date_str = latest[0]
         avg_temp_5day = latest[9]
         rain_2day = latest[10]
 
@@ -641,50 +634,44 @@ class GDDWeedAlert:
                 and rain_2day is not None and rain_2day >= conds["rain_2day_min"]):
 
             year = datetime.now().year
-            alert_key = f"fall_pre_sprout_{year}"
+            alert_key = f"fall_pre_{year}"
             if self._is_alert_sent(alert_key):
-                return None
+                return []
 
-            # Schedule spray follow-up
             today = datetime.now().strftime("%Y-%m-%d")
-            early, late = self._schedule_spray(
-                f"fall_pre_{year}", today, trigger["spray_window_days"],
-                trigger["name"], trigger["weeds"], trigger["action"]
-            )
+            early, late = self._estimate_spray_date(today, trigger["spray_window_days"])
 
-            msg = (
-                f"SPROUTING ALERT: Fall Weed Seeds Germinating\n\n"
-                f"5-Day Avg Temp: {avg_temp_5day:.0f}F (below {conds['avg_temp_below']:.0f}F)\n"
-                f"2-Day Rain: {rain_2day:.2f} in\n\n"
-                f"Winter annual weed seeds are germinating NOW.\n\n"
-                f"Target Weeds:\n"
-                f"{trigger['weeds']}\n\n"
-                f"Estimated Spray Date:\n"
-                f"{self._format_date(early)} - {self._format_date(late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent when it's time to treat."
+            msg1 = (
+                f"SPROUTING: Fall Weeds\n"
+                f"5d Avg {avg_temp_5day:.0f}F | Rain {rain_2day:.2f}in\n"
+                f"Weeds: chickweed, henbit, mustards, Poa annua"
             )
-            return (alert_key, msg)
+            msg2 = (
+                f"SPRAY BY: Fall PRE-Emergent\n"
+                f"Spray {self._short_date(early)}-{self._short_date(late)}\n"
+                f"Apply PRE on clean soil before germination"
+            )
+            return [(f"{alert_key}_sprout", msg1), (f"{alert_key}_spray", msg2)]
 
-        return None
+        return []
 
     def check_late_winter_post(self):
         """
-        LATE WINTER SPROUTING trigger:
+        LATE WINTER trigger:
         5+ consecutive days with avg temp > 45F AND cumulative GDD32 >= 200.
-        Active Feb-Mar. Winter annuals resuming growth.
+        Active Apr-May. Winter annuals resuming growth.
         """
         current_month = datetime.now().month
         if current_month not in TRIGGERS["late_winter_post"]["season_months"]:
-            return None
+            return []
 
         recent = self._get_recent_data(14)
         if len(recent) < 5:
-            return None
+            return []
 
         trigger = TRIGGERS["late_winter_post"]
         conds = trigger["conditions"]
 
-        # Check consecutive warm days
         consecutive = 0
         max_consecutive = 0
         for row in recent:
@@ -702,230 +689,206 @@ class GDDWeedAlert:
                 and cum_gdd32 is not None and cum_gdd32 >= conds["gdd32_min"]):
 
             year = datetime.now().year
-            alert_key = f"late_winter_sprout_{year}"
+            alert_key = f"late_winter_{year}"
             if self._is_alert_sent(alert_key):
-                return None
+                return []
 
-            # Schedule spray follow-up
             today = datetime.now().strftime("%Y-%m-%d")
-            early, late = self._schedule_spray(
-                f"late_winter_{year}", today, trigger["spray_window_days"],
-                trigger["name"], trigger["weeds"], trigger["action"]
-            )
+            early, late = self._estimate_spray_date(today, trigger["spray_window_days"])
 
-            msg = (
-                f"SPROUTING ALERT: Winter Weeds Resuming Growth\n\n"
-                f"Warm Streak: {max_consecutive} days above {conds['warm_day_threshold']:.0f}F\n"
-                f"Cumulative GDD32: {cum_gdd32:.0f}\n\n"
-                f"Winter annual rosettes are actively growing.\n"
-                f"Weeds emerging and building leaf area.\n\n"
-                f"Target Weeds:\n"
-                f"{trigger['weeds']}\n\n"
-                f"Estimated Spray Date:\n"
-                f"{self._format_date(early)} - {self._format_date(late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent when it's time to treat."
+            msg1 = (
+                f"SPROUTING: Winter Weeds\n"
+                f"{max_consecutive}d >{conds['warm_day_threshold']:.0f}F | GDD32: {cum_gdd32:.0f}\n"
+                f"Weeds: chickweed, henbit, shepherd purse"
             )
-            return (alert_key, msg)
+            msg2 = (
+                f"SPRAY BY: Winter Weeds\n"
+                f"Spray {self._short_date(early)}-{self._short_date(late)}\n"
+                f"Spot-spray POST while weeds <6in"
+            )
+            return [(f"{alert_key}_sprout", msg1), (f"{alert_key}_spray", msg2)]
 
-        return None
+        return []
 
     def check_spring_pre(self):
         """
         SPRING PRE-EMERGENT trigger (3-tier):
         GDD50 approaching crabgrass germination threshold.
-        125 = Heads-up, 150 = Apply PRE now, 200 = Germination started (sprouting alert).
-        Active Mar-May.
+        125 = Heads-up, 150 = Apply PRE now, 200 = Germination started.
+        Active Apr-May.
         """
         current_month = datetime.now().month
         if current_month not in TRIGGERS["spring_pre"]["season_months"]:
-            return None
+            return []
 
         latest = self._get_latest_data()
         if not latest:
-            return None
+            return []
 
         cum_gdd50 = latest[7]
         if cum_gdd50 is None:
-            return None
+            return []
 
         trigger = TRIGGERS["spring_pre"]
         conds = trigger["conditions"]
         year = datetime.now().year
 
-        # Tier 3: Germination started - this IS the sprouting alert
+        # Tier 3: Germination started
         if cum_gdd50 >= conds["gdd50_germination"]:
-            alert_key = f"spring_pre_sprout_{year}"
+            alert_key = f"spring_pre_{year}"
             if self._is_alert_sent(alert_key):
-                return None
+                return []
 
             today = datetime.now().strftime("%Y-%m-%d")
-            early, late = self._schedule_spray(
-                f"spring_pre_{year}", today, trigger["spray_window_days"],
-                trigger["name"], trigger["weeds"],
-                "POST-emergent spray on small seedlings (2-6 leaf stage)."
-            )
+            early, late = self._estimate_spray_date(today, trigger["spray_window_days"])
 
-            msg = (
-                f"SPROUTING ALERT: Crabgrass & Foxtail Germinating!\n\n"
-                f"Cumulative GDD50: {cum_gdd50:.0f} (threshold: {conds['gdd50_germination']})\n\n"
-                f"Warm-season grass seeds are sprouting NOW.\n"
-                f"PRE-emergent window has passed.\n\n"
-                f"Target Weeds:\n"
-                f"{trigger['weeds']}\n\n"
-                f"Estimated Spray Date (POST-emergent):\n"
-                f"{self._format_date(early)} - {self._format_date(late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent."
+            msg1 = (
+                f"SPROUTING: Crabgrass/Foxtail\n"
+                f"GDD50: {cum_gdd50:.0f} (sprout at {conds['gdd50_germination']})\n"
+                f"PRE window passed, use POST"
             )
-            return (alert_key, msg)
+            msg2 = (
+                f"SPRAY BY: Crabgrass/Foxtail\n"
+                f"Spray {self._short_date(early)}-{self._short_date(late)}\n"
+                f"POST on small seedlings (2-6 leaf)"
+            )
+            return [(f"{alert_key}_sprout", msg1), (f"{alert_key}_spray", msg2)]
 
         # Tier 2: Apply PRE now (before germination)
         elif cum_gdd50 >= conds["gdd50_apply_by"]:
             alert_key = f"spring_pre_applyby_{year}"
             if self._is_alert_sent(alert_key):
-                return None
-            msg = (
-                f"SPRAY WINDOW: APPLY PRE-EMERGENT NOW\n\n"
-                f"Cumulative GDD50: {cum_gdd50:.0f}\n"
-                f"Apply-By Threshold: {conds['gdd50_apply_by']}\n"
-                f"Germination at: {conds['gdd50_germination']}\n\n"
-                f"Weed seeds have NOT sprouted yet.\n"
-                f"Apply PRE-emergent NOW to prevent germination.\n\n"
-                f"Target Weeds:\n"
-                f"{trigger['weeds']}\n\n"
-                f"Action: {trigger['action']}"
+                return []
+            msg1 = (
+                f"SPROUTING SOON: Crabgrass/Foxtail\n"
+                f"GDD50: {cum_gdd50:.0f} | Sprout at {conds['gdd50_germination']}\n"
+                f"Not sprouted yet"
             )
-            return (alert_key, msg)
+            msg2 = (
+                f"APPLY PRE NOW!\n"
+                f"Weeds: crabgrass, foxtail\n"
+                f"Apply PRE before GDD50 hits {conds['gdd50_germination']}"
+            )
+            return [(f"{alert_key}_sprout", msg1), (f"{alert_key}_spray", msg2)]
 
         # Tier 1: Heads-up (plan your application)
         elif cum_gdd50 >= conds["gdd50_headsup"]:
             alert_key = f"spring_pre_headsup_{year}"
             if self._is_alert_sent(alert_key):
-                return None
+                return []
             msg = (
-                f"HEADS UP: Spring PRE-Emergent Coming Soon\n\n"
-                f"Cumulative GDD50: {cum_gdd50:.0f}\n"
-                f"Apply-By: {conds['gdd50_apply_by']} GDD50\n"
-                f"Germination: {conds['gdd50_germination']} GDD50\n\n"
-                f"Soil warming. Weed seeds NOT sprouting yet.\n"
-                f"Start planning PRE-emergent application.\n\n"
-                f"Target Weeds:\n"
-                f"{trigger['weeds']}"
+                f"HEADS UP: PRE-Emergent Soon\n"
+                f"GDD50: {cum_gdd50:.0f} | Apply by {conds['gdd50_apply_by']}\n"
+                f"Weeds: crabgrass, foxtail\n"
+                f"Plan application now"
             )
-            return (alert_key, msg)
+            return [(alert_key, msg)]
 
-        return None
+        return []
 
     def check_spring_broadleaf(self):
         """
-        SPRING BROADLEAF FLUSH SPROUTING trigger:
+        SPRING BROADLEAF FLUSH trigger:
         GDD50 reaching warm-season broadleaf emergence thresholds.
-        Active Apr-Jun.
+        Active Apr-May.
         """
         current_month = datetime.now().month
         if current_month not in TRIGGERS["spring_broadleaf"]["season_months"]:
-            return None
+            return []
 
         latest = self._get_latest_data()
         if not latest:
-            return None
+            return []
 
         cum_gdd50 = latest[7]
         if cum_gdd50 is None:
-            return None
+            return []
 
         trigger = TRIGGERS["spring_broadleaf"]
         conds = trigger["conditions"]
         year = datetime.now().year
 
         if cum_gdd50 >= conds["gdd50_emergence"]:
-            alert_key = f"spring_broadleaf_sprout_{year}"
+            alert_key = f"spring_broadleaf_{year}"
             if self._is_alert_sent(alert_key):
-                return None
+                return []
 
             today = datetime.now().strftime("%Y-%m-%d")
-            early, late = self._schedule_spray(
-                f"spring_broadleaf_{year}", today, trigger["spray_window_days"],
-                trigger["name"], trigger["weeds"], trigger["action"]
-            )
+            early, late = self._estimate_spray_date(today, trigger["spray_window_days"])
 
-            msg = (
-                f"SPROUTING ALERT: Spring Broadleaf Weeds Emerging\n\n"
-                f"Cumulative GDD50: {cum_gdd50:.0f} (threshold: {conds['gdd50_emergence']})\n\n"
-                f"Warm-season broadleaf seeds are sprouting NOW.\n\n"
-                f"Target Weeds:\n"
-                f"{trigger['weeds']}\n\n"
-                f"Estimated Spray Date:\n"
-                f"{self._format_date(early)} - {self._format_date(late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent.\n"
-                f"Spray POST before GDD50 reaches {conds['gdd50_spray_by']}."
+            msg1 = (
+                f"SPROUTING: Broadleaf Weeds\n"
+                f"GDD50: {cum_gdd50:.0f} (threshold {conds['gdd50_emergence']})\n"
+                f"Weeds: pigweed, ragweed, spurge"
             )
-            return (alert_key, msg)
+            msg2 = (
+                f"SPRAY BY: Broadleaf Weeds\n"
+                f"Spray {self._short_date(early)}-{self._short_date(late)}\n"
+                f"POST while seedlings small (2-6 leaf)"
+            )
+            return [(f"{alert_key}_sprout", msg1), (f"{alert_key}_spray", msg2)]
 
-        return None
+        return []
 
     def check_perennial_fall(self):
         """
-        PERENNIAL FALL ROSETTE SPROUTING trigger:
+        PERENNIAL FALL ROSETTE trigger:
         Temps cooling, perennials forming rosettes for winter.
-        Active Sep-Nov.
+        Active Sep-Oct.
         """
         current_month = datetime.now().month
         if current_month not in TRIGGERS["perennial_fall"]["season_months"]:
-            return None
+            return []
 
         recent = self._get_recent_data(10)
         if len(recent) < 7:
-            return None
+            return []
 
         trigger = TRIGGERS["perennial_fall"]
         conds = trigger["conditions"]
 
         last7_temps = [r[3] for r in recent[-7:] if r[3] is not None]
         if not last7_temps:
-            return None
+            return []
 
         avg7 = sum(last7_temps) / len(last7_temps)
 
         if avg7 <= conds["avg_temp_below"]:
             year = datetime.now().year
-            alert_key = f"perennial_fall_sprout_{year}"
+            alert_key = f"perennial_fall_{year}"
             if self._is_alert_sent(alert_key):
-                return None
+                return []
 
             today = datetime.now().strftime("%Y-%m-%d")
-            early, late = self._schedule_spray(
-                f"perennial_fall_{year}", today, trigger["spray_window_days"],
-                trigger["name"], trigger["weeds"], trigger["action"]
-            )
+            early, late = self._estimate_spray_date(today, trigger["spray_window_days"])
 
-            msg = (
-                f"SPROUTING ALERT: Perennial Rosettes Forming (Fall)\n\n"
-                f"7-Day Avg Temp: {avg7:.0f}F\n"
-                f"Perennials are forming rosettes for winter.\n"
-                f"Active growth window before dormancy.\n\n"
-                f"Target Weeds:\n"
-                f"{trigger['weeds']}\n\n"
-                f"Estimated Spray Date:\n"
-                f"{self._format_date(early)} - {self._format_date(late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent."
+            msg1 = (
+                f"SPROUTING: Fall Perennials\n"
+                f"7d Avg {avg7:.0f}F - rosettes forming\n"
+                f"Weeds: dandelion, dock, thistle, plantain"
             )
-            return (alert_key, msg)
+            msg2 = (
+                f"SPRAY BY: Fall Perennials\n"
+                f"Spray {self._short_date(early)}-{self._short_date(late)}\n"
+                f"Treat rosettes before dormancy"
+            )
+            return [(f"{alert_key}_sprout", msg1), (f"{alert_key}_spray", msg2)]
 
-        return None
+        return []
 
     def check_perennial_spring(self):
         """
-        PERENNIAL SPRING ROSETTE SPROUTING trigger:
+        PERENNIAL SPRING ROSETTE trigger:
         Warming temps, perennials resuming growth.
-        Active Mar-May.
+        Active Apr-May.
         """
         current_month = datetime.now().month
         if current_month not in TRIGGERS["perennial_spring"]["season_months"]:
-            return None
+            return []
 
         recent = self._get_recent_data(14)
         if len(recent) < 7:
-            return None
+            return []
 
         trigger = TRIGGERS["perennial_spring"]
         conds = trigger["conditions"]
@@ -947,31 +910,26 @@ class GDDWeedAlert:
                 and cum_gdd50 is not None and cum_gdd50 >= conds["gdd50_min"]):
 
             year = datetime.now().year
-            alert_key = f"perennial_spring_sprout_{year}"
+            alert_key = f"perennial_spring_{year}"
             if self._is_alert_sent(alert_key):
-                return None
+                return []
 
             today = datetime.now().strftime("%Y-%m-%d")
-            early, late = self._schedule_spray(
-                f"perennial_spring_{year}", today, trigger["spray_window_days"],
-                trigger["name"], trigger["weeds"], trigger["action"]
-            )
+            early, late = self._estimate_spray_date(today, trigger["spray_window_days"])
 
-            msg = (
-                f"SPROUTING ALERT: Perennial Weeds Resuming Growth (Spring)\n\n"
-                f"Warm Streak: {max_consecutive} days above {conds['warm_day_threshold']:.0f}F\n"
-                f"Cumulative GDD50: {cum_gdd50:.0f}\n\n"
-                f"Perennial weeds breaking dormancy and actively growing.\n"
-                f"Rosettes forming - spray before bolting.\n\n"
-                f"Target Weeds:\n"
-                f"{trigger['weeds']}\n\n"
-                f"Estimated Spray Date:\n"
-                f"{self._format_date(early)} - {self._format_date(late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent."
+            msg1 = (
+                f"SPROUTING: Spring Perennials\n"
+                f"{max_consecutive}d >{conds['warm_day_threshold']:.0f}F | GDD50: {cum_gdd50:.0f}\n"
+                f"Weeds: dandelion, dock, thistle, plantain"
             )
-            return (alert_key, msg)
+            msg2 = (
+                f"SPRAY BY: Spring Perennials\n"
+                f"Spray {self._short_date(early)}-{self._short_date(late)}\n"
+                f"Treat rosettes before bolting"
+            )
+            return [(f"{alert_key}_sprout", msg1), (f"{alert_key}_spray", msg2)]
 
-        return None
+        return []
 
     # -------------------------------------------------------------------------
     # SMS Sending
@@ -1041,8 +999,9 @@ class GDDWeedAlert:
             self.logger.info("Sparse data (%d days). Running backfill first...", count)
             self.backfill()
 
-        # Phase 1: Check all SPROUTING triggers
-        sprouting_checks = [
+        # Check all triggers - each returns list of (alert_key, message) pairs
+        # Sprouting + Spray-by texts are sent together immediately
+        all_checks = [
             self.check_fall_pre,
             self.check_late_winter_post,
             self.check_spring_pre,
@@ -1052,24 +1011,14 @@ class GDDWeedAlert:
         ]
 
         sent_messages = []
-        for check_fn in sprouting_checks:
-            result = check_fn()
-            if result:
-                alert_key, message = result
-                self.logger.info("Sprouting trigger fired: %s", alert_key)
+        for check_fn in all_checks:
+            alerts = check_fn()
+            for alert_key, message in alerts:
+                self.logger.info("Alert triggered: %s", alert_key)
                 success = self.send_alert(message)
                 if success:
                     self._record_alert(alert_key, message)
                     sent_messages.append(message)
-
-        # Phase 2: Check if any scheduled SPRAY WINDOWS have arrived
-        spray_alerts = self.check_spray_windows()
-        for alert_key, message in spray_alerts:
-            self.logger.info("Spray window trigger fired: %s", alert_key)
-            success = self.send_alert(message)
-            if success:
-                self._record_alert(alert_key, message)
-                sent_messages.append(message)
 
         if not sent_messages:
             self.logger.info("No weed alert triggers fired today.")
@@ -1078,93 +1027,82 @@ class GDDWeedAlert:
         return sent_messages
 
     def send_test_alerts(self):
-        """Send sample test alerts showing both SPROUTING and SPRAY WINDOW phases."""
+        """Send test alert pairs: SPROUTING text + SPRAY BY text for each trigger."""
         import time
 
         today = datetime.now()
-        spray_early = (today + timedelta(days=10)).strftime("%Y-%m-%d")
-        spray_late = (today + timedelta(days=16)).strftime("%Y-%m-%d")
+        se = (today + timedelta(days=10)).strftime("%Y-%m-%d")
+        sl = (today + timedelta(days=16)).strftime("%Y-%m-%d")
 
         latest = self._get_latest_data()
         cum_gdd32 = latest[8] if latest else 450
 
-        test_messages = [
-            # --- SPROUTING ALERTS (Phase 1) ---
+        # Each pair: (sprouting_msg, spray_by_msg)
+        test_pairs = [
+            # FALL: Annuals
             (
-                f"SPROUTING ALERT: Fall Weed Seeds Germinating\n\n"
-                f"5-Day Avg Temp: 65F (below 70F)\n"
-                f"2-Day Rain: 0.48 in\n\n"
-                f"Winter annual weed seeds are germinating NOW.\n\n"
-                f"Target Weeds:\n"
-                f"chickweed, henbit, mustards, Poa annua, deadnettle\n\n"
-                f"Estimated Spray Date:\n"
-                f"{self._format_date(spray_early)} - {self._format_date(spray_late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent when it's time to treat."
+                f"SPROUTING: Fall Weeds\n"
+                f"5d Avg 65F | Rain 0.48in\n"
+                f"Weeds: chickweed, henbit, mustards, Poa annua",
+                f"SPRAY BY: Fall PRE-Emergent\n"
+                f"Spray {self._short_date(se)}-{self._short_date(sl)}\n"
+                f"Apply PRE on clean soil before germination",
             ),
+            # FALL: Perennials
             (
-                f"SPROUTING ALERT: Winter Weeds Resuming Growth\n\n"
-                f"Warm Streak: 6 days above 45F\n"
-                f"Cumulative GDD32: {cum_gdd32:.0f}\n\n"
-                f"Winter annual rosettes are actively growing.\n"
-                f"Weeds emerging and building leaf area.\n\n"
-                f"Target Weeds:\n"
-                f"winter annual rosettes, chickweed, henbit, shepherd's purse\n\n"
-                f"Estimated Spray Date:\n"
-                f"{self._format_date(spray_early)} - {self._format_date(spray_late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent when it's time to treat."
+                f"SPROUTING: Fall Perennials\n"
+                f"7d Avg 62F - rosettes forming\n"
+                f"Weeds: dandelion, dock, thistle, plantain",
+                f"SPRAY BY: Fall Perennials\n"
+                f"Spray {self._short_date(se)}-{self._short_date(sl)}\n"
+                f"Treat rosettes before dormancy",
             ),
+            # SPRING: Crabgrass/Foxtail
             (
-                f"SPROUTING ALERT: Crabgrass & Foxtail Germinating!\n\n"
-                f"Cumulative GDD50: 205 (threshold: 200)\n\n"
-                f"Warm-season grass seeds are sprouting NOW.\n"
-                f"PRE-emergent window has passed.\n\n"
-                f"Target Weeds:\n"
-                f"crabgrass, foxtail, other warm-season annual grasses\n\n"
-                f"Estimated Spray Date (POST-emergent):\n"
-                f"{self._format_date(spray_early)} - {self._format_date(spray_late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent."
+                f"SPROUTING: Crabgrass/Foxtail\n"
+                f"GDD50: 205 (sprout at 200)\n"
+                f"PRE window passed, use POST",
+                f"SPRAY BY: Crabgrass/Foxtail\n"
+                f"Spray {self._short_date(se)}-{self._short_date(sl)}\n"
+                f"POST on small seedlings (2-6 leaf)",
             ),
+            # SPRING: Broadleaf
             (
-                f"SPROUTING ALERT: Spring Broadleaf Weeds Emerging\n\n"
-                f"Cumulative GDD50: 320 (threshold: 300)\n\n"
-                f"Warm-season broadleaf seeds are sprouting NOW.\n\n"
-                f"Target Weeds:\n"
-                f"lambsquarters, pigweed, ragweed, spotted spurge, groundsel\n\n"
-                f"Estimated Spray Date:\n"
-                f"{self._format_date(spray_early)} - {self._format_date(spray_late)}\n\n"
-                f"A follow-up SPRAY WINDOW alert will be sent."
+                f"SPROUTING: Broadleaf Weeds\n"
+                f"GDD50: 320 (threshold 300)\n"
+                f"Weeds: pigweed, ragweed, spurge",
+                f"SPRAY BY: Broadleaf Weeds\n"
+                f"Spray {self._short_date(se)}-{self._short_date(sl)}\n"
+                f"POST while seedlings small (2-6 leaf)",
             ),
-
-            # --- SPRAY WINDOW ALERTS (Phase 2) ---
+            # SPRING: Perennials
             (
-                f"SPRAY WINDOW: FALL PRE-EMERGENT\n\n"
-                f"Status: READY - 12 days since sprouting\n"
-                f"Spray by: {self._format_date(spray_late)}\n\n"
-                f"Target Weeds:\n"
-                f"chickweed, henbit, mustards, Poa annua, deadnettle\n\n"
-                f"Action: Apply PRE-emergent on clean soil. Rainfall will activate.\n\n"
-                f"Treat while weeds are small (2-6 leaf, under 6 inches)."
-            ),
-            (
-                f"SPRAY WINDOW: LATE WINTER SCOUT & SPRAY\n\n"
-                f"Status: READY - 14 days since sprouting\n"
-                f"Spray by: {self._format_date(spray_late)}\n\n"
-                f"Target Weeds:\n"
-                f"winter annual rosettes, chickweed, henbit, shepherd's purse\n\n"
-                f"Action: Scout fields. Spot-spray POST while weeds < 6 inches, before bolting.\n\n"
-                f"Treat while weeds are small (2-6 leaf, under 6 inches)."
+                f"SPROUTING: Spring Perennials\n"
+                f"7d >50F | GDD50: 120\n"
+                f"Weeds: dandelion, dock, thistle, plantain",
+                f"SPRAY BY: Spring Perennials\n"
+                f"Spray {self._short_date(se)}-{self._short_date(sl)}\n"
+                f"Treat rosettes before bolting",
             ),
         ]
 
-        for i, msg in enumerate(test_messages):
-            label = "SPROUTING" if i < 4 else "SPRAY WINDOW"
-            print(f"\n--- Test {i+1}/{len(test_messages)} ({label}) ---")
-            print(msg[:70] + "...")
-            self.send_alert(msg)
+        total = len(test_pairs) * 2
+        msg_num = 0
+        for sprout_msg, spray_msg in test_pairs:
+            msg_num += 1
+            print(f"\n--- {msg_num}/{total} SPROUTING ---")
+            print(sprout_msg)
+            self.send_alert(sprout_msg)
             time.sleep(3)
 
-        print(f"\nAll {len(test_messages)} test alerts sent!")
-        print("4 SPROUTING alerts + 2 SPRAY WINDOW alerts")
+            msg_num += 1
+            print(f"\n--- {msg_num}/{total} SPRAY BY ---")
+            print(spray_msg)
+            self.send_alert(spray_msg)
+            time.sleep(3)
+
+        print(f"\nAll {total} test alerts sent!")
+        print(f"{len(test_pairs)} pairs (SPROUTING + SPRAY BY each)")
 
     def show_status(self):
         """Display current GDD accumulation and trigger status."""

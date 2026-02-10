@@ -52,11 +52,8 @@ LOCATION = {
 # In cloud mode (GitHub Actions), these come from environment variables.
 # For local use, the defaults below are used as fallback.
 ZAPIER_CONFIG = {
-    "webhook_url": os.environ.get(
-        "ZAPIER_WEBHOOK_URL",
-        "https://hooks.zapier.com/hooks/catch/23257298/ueog4uk/"
-    ),
-    "phone_number": os.environ.get("ALERT_PHONE_NUMBER", "5034815324"),
+    "webhook_url": os.environ.get("ZAPIER_WEBHOOK_URL", ""),
+    "phone_number": os.environ.get("ALERT_PHONE_NUMBER", ""),
 }
 
 # --- Alert Thresholds ---
